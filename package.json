@@ -1,0 +1,45 @@
+{
+  "name": "@dsh-external/dsh-client-pet-deepwhale",
+  "description": "DeepSeek balance desktop pet — the rice-loving blue whale that reports your balance in cute sayings (character art: bilibili 这个刀子真甜 https://space.bilibili.com/23315338)",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BOXLINEovo/dsh-pet.git"
+  },
+  "author": "BOXLINEovo",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "tsdown"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "lightningcss": "^1.32.0",
+    "tsdown": "0.22.14"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "src"
+  ]
+}

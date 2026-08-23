@@ -1,0 +1,18 @@
+dsh-pet (plugin code)
+=====================
+Copyright (c) 2026 BOXLINEovo
+Licensed under the MIT License (see LICENSE).
+The MIT license covers the plugin code only.
+
+Image asset
+===========
+File: src/client/pet-art.generated.ts (inline data URL, derived from the
+workspace image dsh-clear.png)
+
+Source: bilibili UP 主「这个刀子真甜」
+  Space: https://space.bilibili.com/23315338
+
+The character image belongs to its original creator and is used here with
+attribution. The MIT license of this repository does NOT extend to the image.
+Redistribution, modification, or commercial use of the image requires the
+original creator's permission.

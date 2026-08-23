@@ -1,0 +1,5 @@
+# dsh-pet bundle patch: inserts its public dsh.client entry into the web plugin roster.
+# Install with `dsh plugin --profile web add <path-to-this-package>`.
+- insert:
+    - id: client-pet-deepwhale
+      name: '@dsh-external/dsh-client-pet-deepwhale'

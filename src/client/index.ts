@@ -1,0 +1,340 @@
+/**
+ * Browser half of the dsh-pet deepwhale plugin: a draggable, flip-able
+ * desktop pet that reports the DeepSeek account balance in cute rice-themed
+ * sayings. Pure-DOM implementation — no React — mirrored on the maid-atelier
+ * client pattern, with every write retracted by the Cordis effect disposer.
+ */
+import { DEEPWHALE_PET } from './pet-art.generated.ts'
+
+const TOP_UP_URL = 'https://platform.deepseek.com/top_up'
+const CHAR_W = 170
+const CHAR_H = 234
+const BUBBLE_H = 96
+const PAD = 10
+const FLIP_MS = 300
+
+/** 可爱发言池：每句都带上余额（a 形如 ¥110.00） */
+const SAYINGS = [
+  (a: string) => `白饭就剩${a}了！`,
+  (a: string) => `今天的口粮还有${a}，够吃~`,
+  (a: string) => `${a}的白饭，够我游很久呢！`,
+  (a: string) => `宝，白饭只剩${a}了，要省着点吃…`,
+  (a: string) => `数了数米缸，还有${a}的白饭！`,
+  (a: string) => `咕噜…白饭就剩${a}了，好想吃！`,
+  (a: string) => `肚子咕咕叫，口粮还有${a}~`,
+  (a: string) => `${a}的白饭，感觉可以囤起来！`,
+  (a: string) => `盯…那是${a}的白饭吗？想吃！`,
+]
+
+const css = `
+.dshp-wrap {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.dshp-wrap:active { cursor: grabbing; }
+.dshp-breathe {
+  transform-origin: 50% 100%;
+  animation: dshp-breathe 3.8s ease-in-out infinite;
+}
+.dshp-char { position: relative; }
+.dshp-flip {
+  transform-origin: 50% 50%;
+  transition: transform 0.3s ease;
+  z-index: 0;
+}
+.dshp-img {
+  width: 170px;
+  height: auto;
+  display: block;
+  filter: drop-shadow(0 10px 14px rgba(0, 0, 0, 0.3));
+}
+.dshp-img.dshp-petting { animation: dshp-pet 0.9s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+.dshp-bubble {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  z-index: 10;
+  min-width: 150px;
+  max-width: 320px;
+  padding: 10px 16px 11px;
+  background: var(--dsw-alias-bg-overlay);
+  color: var(--dsw-alias-label-primary);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 16px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18);
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  text-align: center;
+}
+.dshp-bubble::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -8px;
+  transform: translateX(-50%);
+  border-left: 9px solid transparent;
+  border-right: 9px solid transparent;
+  border-top: 10px solid var(--dsw-alias-bg-overlay);
+}
+.dshp-main { font-size: 16px; font-weight: 700; line-height: 1.45; color: var(--dsw-alias-label-primary); letter-spacing: 0.2px; }
+.dshp-sub { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-top: 2px; line-height: 1.3; }
+.dshp-link {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.dshp-link:hover { background: var(--dsw-alias-bg-layer-1); }
+.dshp-heart {
+  position: absolute;
+  bottom: 78%;
+  font-size: 15px;
+  opacity: 0;
+  animation: dshp-heart 1.15s ease-out forwards;
+  pointer-events: none;
+  z-index: 5;
+}
+@keyframes dshp-breathe {
+  0%, 100% { transform: scale(1) rotate(0deg); }
+  50% { transform: scale(1.015, 1.005) rotate(0.5deg); }
+}
+@keyframes dshp-pet {
+  0% { transform: scale(1); }
+  20% { transform: scale(1.1, 0.92) rotate(-2deg); }
+  40% { transform: scale(0.92, 1.08) rotate(2deg); }
+  60% { transform: scale(1.05, 0.96) rotate(-1deg); }
+  80% { transform: scale(0.98, 1.02); }
+  100% { transform: scale(1); }
+}
+@keyframes dshp-heart {
+  0% { opacity: 0; transform: translateY(6px) scale(0.5); }
+  15% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-84px) scale(1.15); }
+}
+`
+
+interface BalanceResult {
+  ok: boolean
+  error?: string
+  currency?: string
+  total?: string
+}
+
+function fmt(v: unknown): string {
+  const n = typeof v === 'number' ? v : Number.parseFloat(String(v))
+  return Number.isFinite(n) ? n.toFixed(2) : String(v == null ? '' : v)
+}
+function symbol(c: unknown): string {
+  return c === 'CNY' ? '¥' : (c ? `${c} ` : '')
+}
+
+export function apply(ctx: { effect(callback: () => () => void): unknown }): void {
+  const view = { node: null as HTMLElement | null, rect: null as DOMRect | null }
+  const state = { x: 0, y: 0, facing: 'left' as 'left' | 'right' }
+  const drag = { current: null as null | {
+    id: number; sx: number; sy: number; ox: number; oy: number
+    moved: boolean; movedDist: number; px: number; py: number; acc: number; rect: DOMRect
+  } }
+  let lastPos: { x: number; y: number } | null = null
+
+  // ---- styles + root ----
+  const style = document.createElement('style')
+  style.dataset.plugin = 'dsh-pet-deepwhale'
+  style.textContent = css
+  document.head.appendChild(style)
+
+  const root = document.createElement('div')
+  root.style.cssText = 'position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:2147483647;'
+  document.body.appendChild(root)
+
+  // ---- pet DOM ----
+  const wrap = document.createElement('div')
+  wrap.className = 'dshp-wrap'
+  wrap.style.cssText = 'position:absolute;transform:translate(-50%,-100%);pointer-events:auto;'
+  root.appendChild(wrap)
+
+  const breathe = document.createElement('div')
+  breathe.className = 'dshp-breathe'
+  wrap.appendChild(breathe)
+
+  const char = document.createElement('div')
+  char.className = 'dshp-char'
+  breathe.appendChild(char)
+
+  const bubble = document.createElement('div')
+  bubble.className = 'dshp-bubble'
+  char.appendChild(bubble)
+
+  const main = document.createElement('div')
+  main.className = 'dshp-main'
+  main.textContent = '深度思考中…'
+  bubble.appendChild(main)
+
+  const sub = document.createElement('div')
+  sub.className = 'dshp-sub'
+  sub.style.display = 'none'
+  bubble.appendChild(sub)
+
+  const link = document.createElement('a')
+  link.className = 'dshp-link'
+  link.href = TOP_UP_URL
+  link.target = '_blank'
+  link.rel = 'noreferrer'
+  link.textContent = '🍚白饭，想吃~'
+  bubble.appendChild(link)
+
+  const flip = document.createElement('div')
+  flip.className = 'dshp-flip'
+  flip.style.transform = 'perspective(700px) rotateY(0deg)'
+  char.appendChild(flip)
+
+  const img = document.createElement('img')
+  img.className = 'dshp-img'
+  img.src = DEEPWHALE_PET
+  img.alt = 'DeepSeek 大肥鱼'
+  img.draggable = false
+  flip.appendChild(img)
+
+  // ---- helpers ----
+  const setFacing = (dir: 'left' | 'right'): void => {
+    if (state.facing === dir) return
+    state.facing = dir
+    flip.style.transform = dir === 'left' ? 'perspective(700px) rotateY(0deg)' : 'perspective(700px) rotateY(180deg)'
+  }
+  const setPos = (x: number, y: number): void => {
+    state.x = x
+    state.y = y
+    wrap.style.left = `${x}px`
+    wrap.style.top = `${y}px`
+  }
+  const faceCenter = (): void => {
+    const r = view.rect ?? (view.node ? view.node.getBoundingClientRect() : null)
+    const dir = state.x < (r ? r.width / 2 : state.x) ? 'right' : 'left'
+    setFacing(dir)
+  }
+
+  // ---- balance ----
+  const refreshBalance = async (): Promise<void> => {
+    main.textContent = '深度思考中…'
+    sub.style.display = 'none'
+    try {
+      const resp = await fetch('/dsh-pet/balance', { cache: 'no-store' })
+      const result = (await resp.json()) as BalanceResult
+      if (result.ok) {
+        const amt = symbol(result.currency) + fmt(result.total)
+        const line = SAYINGS[Math.floor(Math.random() * SAYINGS.length)](amt)
+        main.textContent = line
+      } else {
+        main.textContent = '余额获取失败'
+        const err = result.error ?? '未知错误'
+        sub.textContent = err === 'no-api-key' ? '未配置 API Key' : err
+        sub.style.display = ''
+      }
+    } catch {
+      main.textContent = '余额获取失败'
+      sub.textContent = 'rpc'
+      sub.style.display = ''
+    }
+  }
+
+  // ---- interactions ----
+  const onPointerDown = (e: PointerEvent): void => {
+    e.preventDefault()
+    try { wrap.setPointerCapture(e.pointerId) } catch { /* ignore */ }
+    const r = view.node ? view.node.getBoundingClientRect() : view.rect
+    if (!r) return
+    drag.current = {
+      id: e.pointerId, sx: e.clientX, sy: e.clientY,
+      ox: state.x, oy: state.y, moved: false, movedDist: 0,
+      px: e.clientX, py: e.clientY, acc: 0, rect: r,
+    }
+  }
+  const onPointerMove = (e: PointerEvent): void => {
+    const d = drag.current
+    if (!d || d.id !== e.pointerId) return
+    const dx = e.clientX - d.px
+    const dy = e.clientY - d.py
+    d.px = e.clientX
+    d.py = e.clientY
+    d.movedDist += Math.abs(dx) + Math.abs(dy)
+    if (d.movedDist > 6) d.moved = true
+    const nx = Math.max(CHAR_W / 2 + PAD, Math.min(d.rect.width - CHAR_W / 2 - PAD, d.ox + (e.clientX - d.sx)))
+    const ny = Math.max(CHAR_H + BUBBLE_H, Math.min(d.rect.height - 8, d.oy + (e.clientY - d.sy)))
+    d.acc += dx
+    if (Math.abs(d.acc) > 20) {
+      setFacing(d.acc > 0 ? 'right' : 'left')
+      d.acc = 0
+    }
+    setPos(nx, ny)
+  }
+  const onPointerUp = (e: PointerEvent): void => {
+    const d = drag.current
+    if (!d || d.id !== e.pointerId) return
+    drag.current = null
+    try { wrap.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+    if (d.moved) {
+      lastPos = { x: state.x, y: state.y }
+      faceCenter()
+    } else {
+      pet()
+    }
+  }
+  const onLinkDown = (e: Event): void => e.stopPropagation()
+
+  const pet = (): void => {
+    img.classList.add('dshp-petting')
+    for (let i = 0; i < 4; i++) {
+      const heart = document.createElement('span')
+      heart.className = 'dshp-heart'
+      heart.textContent = '❤'
+      heart.style.left = `${16 + Math.random() * 68}%`
+      heart.style.animationDelay = `${Math.random() * 0.18}s`
+      char.appendChild(heart)
+      window.setTimeout(() => heart.remove(), 1400)
+    }
+    window.setTimeout(() => img.classList.remove('dshp-petting'), 1000)
+    void refreshBalance()
+  }
+
+  wrap.addEventListener('pointerdown', onPointerDown)
+  wrap.addEventListener('pointermove', onPointerMove)
+  wrap.addEventListener('pointerup', onPointerUp)
+  wrap.addEventListener('pointercancel', onPointerUp)
+  link.addEventListener('pointerdown', onLinkDown)
+  link.addEventListener('click', onLinkDown)
+
+  // ---- initial placement ----
+  const rect = root.getBoundingClientRect()
+  view.node = root
+  view.rect = rect
+  const x0 = lastPos ? lastPos.x : Math.max(CHAR_W / 2 + PAD, rect.width - CHAR_W / 2 - PAD)
+  const y0 = lastPos ? lastPos.y : Math.max(CHAR_H + BUBBLE_H, rect.height - 40)
+  state.facing = x0 < rect.width / 2 ? 'right' : 'left'
+  flip.style.transform = state.facing === 'left' ? 'perspective(700px) rotateY(0deg)' : 'perspective(700px) rotateY(180deg)'
+  setPos(x0, y0)
+
+  void refreshBalance()
+  const timer = window.setInterval(() => { void refreshBalance() }, 5 * 60 * 1000)
+
+  ctx.effect(() => () => {
+    window.clearInterval(timer)
+    wrap.removeEventListener('pointerdown', onPointerDown)
+    wrap.removeEventListener('pointermove', onPointerMove)
+    wrap.removeEventListener('pointerup', onPointerUp)
+    wrap.removeEventListener('pointercancel', onPointerUp)
+    link.removeEventListener('pointerdown', onLinkDown)
+    link.removeEventListener('click', onLinkDown)
+    root.remove()
+    style.remove()
+  })
+}
