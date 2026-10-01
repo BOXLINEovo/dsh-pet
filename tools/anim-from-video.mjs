@@ -223,7 +223,29 @@ writeFileSync(out, [
   '',
 ].join('\n'))
 
+// --also-idle：把动画首帧（已抠底）同时写成静止图，静止/动画同一渲染，切换无跳变
+if (has('also-idle')) {
+  const idleWebp = resolve('.idle-from-first.webp')
+  execFileSync(ffmpeg.path, [
+    '-y', '-i', join(framesDir, 's_0001.png'),
+    '-vcodec', 'libwebp', '-lossless', '0', '-q:v', '75',
+    idleWebp,
+  ], { stdio: ['ignore', 'ignore', 'pipe'] })
+  const idleBuf = readFileSync(idleWebp)
+  const idleOut = resolve('src/client/pet-idle.generated.ts')
+  writeFileSync(idleOut, [
+    '// Generated idle art（取自动画首帧，与动画同一渲染）. Regenerate with:',
+    `//   node tools/anim-from-video.mjs <视频> --name ${slug} --start 0 --duration 3 --also-idle`,
+    '/** 默认静止姿态（点击动画播完也回到它） */',
+    dataUrlLine('PET_IDLE', idleBuf),
+    '',
+  ].join('\n'))
+  rmSync(idleWebp, { force: true })
+  console.log(`      静止图已更新为动画首帧: ${idleOut}（${(idleBuf.length / 1024).toFixed(1)} KB）`)
+}
+
 if (!keepFrames) rmSync(framesDir, { recursive: true, force: true })
 rmSync(webpPath, { force: true })
 console.log(`完成: ${out}`)
 console.log(`记得在 src/client/pet-art.ts 里 import 并加入 PET_ANIMS（名字: ${slug}）`)
+
