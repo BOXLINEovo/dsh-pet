@@ -33,6 +33,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "jsdom": "^30.0.1",
     "lightningcss": "^1.32.0",
     "tsdown": "0.22.14"
   },

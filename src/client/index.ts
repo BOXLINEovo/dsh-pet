@@ -80,6 +80,13 @@ const css = `
   border-top: 10px solid var(--dsw-alias-bg-overlay);
 }
 .dshp-main { font-size: 16px; font-weight: 700; line-height: 1.45; color: var(--dsw-alias-label-primary); letter-spacing: 0.2px; }
+.dshp-period {
+  font-size: 11px;
+  line-height: 1.35;
+  margin-top: 3px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dshp-period.dshp-off { color: var(--dsw-alias-state-success-primary); font-weight: 600; }
 .dshp-sub { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-top: 2px; line-height: 1.3; }
 .dshp-link {
   display: inline-block;
@@ -123,19 +130,34 @@ const css = `
 }
 `
 
-interface BalanceResult {
-  ok: boolean
-  error?: string
-  currency?: string
-  total?: string
-}
-
 function fmt(v: unknown): string {
   const n = typeof v === 'number' ? v : Number.parseFloat(String(v))
   return Number.isFinite(n) ? n.toFixed(2) : String(v == null ? '' : v)
 }
 function symbol(c: unknown): string {
   return c === 'CNY' ? '¥' : (c ? `${c} ` : '')
+}
+
+/**
+ * DeepSeek 错峰优惠时段：北京时间 00:30–08:30 为低谷（discount），其余为高峰。
+ * 按 UTC 计算，不受用户本地时区影响。
+ */
+const OFF_PEAK_START_MIN = 30
+const OFF_PEAK_END_MIN = 8 * 60 + 30
+
+function periodNow(): { off: boolean; text: string } {
+  const now = new Date()
+  const bjMinutes = ((now.getUTCHours() + 8) % 24) * 60 + now.getUTCMinutes()
+  const off = bjMinutes >= OFF_PEAK_START_MIN && bjMinutes < OFF_PEAK_END_MIN
+  const remain = off
+    ? (OFF_PEAK_END_MIN - bjMinutes + 1440) % 1440
+    : (OFF_PEAK_START_MIN - bjMinutes + 1440) % 1440
+  const hours = Math.floor(remain / 60)
+  const minutes = remain % 60
+  const left = hours > 0 ? `${hours}小时${minutes}分` : `${minutes}分`
+  return off
+    ? { off: true, text: `🌙 低谷时段 · 白饭打折！还剩 ${left}` }
+    : { off: false, text: `☀️ 高峰时段 · 白饭原价，距低谷 ${left}` }
 }
 
 export function apply(ctx: { effect(callback: () => () => void): unknown }): void {
@@ -180,6 +202,10 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
   main.textContent = '深度思考中…'
   bubble.appendChild(main)
 
+  const period = document.createElement('div')
+  period.className = 'dshp-period'
+  bubble.appendChild(period)
+
   const sub = document.createElement('div')
   sub.className = 'dshp-sub'
   sub.style.display = 'none'
@@ -223,28 +249,55 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
     setFacing(dir)
   }
 
+  // ---- peak / off-peak hint ----
+  const syncPeriod = (): void => {
+    const p = periodNow()
+    period.textContent = p.text
+    period.classList.toggle('dshp-off', p.off)
+  }
+
   // ---- balance ----
-  const refreshBalance = async (): Promise<void> => {
+  const fetchOnce = async (): Promise<
+    { ok: true; line: string } | { ok: false; code: string; detail?: string }
+  > => {
+    const resp = await fetch('/dsh-pet/balance', { cache: 'no-store' })
+    const r = (await resp.json()) as {
+      ok?: boolean
+      error?: string
+      detail?: string
+      currency?: string
+      total?: string
+    }
+    if (r.ok) {
+      const amt = symbol(r.currency) + fmt(r.total)
+      return { ok: true, line: SAYINGS[Math.floor(Math.random() * SAYINGS.length)](amt) }
+    }
+    return { ok: false, code: r.error ?? '未知错误', detail: r.detail }
+  }
+
+  const refreshBalance = async (attempt = 0): Promise<void> => {
     main.textContent = '深度思考中…'
     sub.style.display = 'none'
+    let failure: { code: string; detail?: string } | null = null
     try {
-      const resp = await fetch('/dsh-pet/balance', { cache: 'no-store' })
-      const result = (await resp.json()) as BalanceResult
+      const result = await fetchOnce()
       if (result.ok) {
-        const amt = symbol(result.currency) + fmt(result.total)
-        const line = SAYINGS[Math.floor(Math.random() * SAYINGS.length)](amt)
-        main.textContent = line
-      } else {
-        main.textContent = '余额获取失败'
-        const err = result.error ?? '未知错误'
-        sub.textContent = err === 'no-api-key' ? '未配置 API Key' : err
-        sub.style.display = ''
+        main.textContent = result.line
+        return
       }
-    } catch {
-      main.textContent = '余额获取失败'
-      sub.textContent = 'rpc'
-      sub.style.display = ''
+      failure = { code: result.code, detail: result.detail }
+    } catch (error) {
+      failure = { code: 'rpc', detail: String((error as Error)?.message ?? error) }
     }
+    // transient startup/network hiccups: retry twice before surfacing the error
+    if (attempt < 2) {
+      window.setTimeout(() => { void refreshBalance(attempt + 1) }, 3000)
+      return
+    }
+    main.textContent = '余额获取失败'
+    const code = failure.code === 'no-api-key' ? '未配置 API Key' : failure.code
+    sub.textContent = failure.detail ? `${code} · ${failure.detail.slice(0, 70)}` : code
+    sub.style.display = ''
   }
 
   // ---- interactions ----
@@ -324,10 +377,13 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
   setPos(x0, y0)
 
   void refreshBalance()
+  syncPeriod()
   const timer = window.setInterval(() => { void refreshBalance() }, 5 * 60 * 1000)
+  const periodTimer = window.setInterval(syncPeriod, 30 * 1000)
 
   ctx.effect(() => () => {
     window.clearInterval(timer)
+    window.clearInterval(periodTimer)
     wrap.removeEventListener('pointerdown', onPointerDown)
     wrap.removeEventListener('pointermove', onPointerMove)
     wrap.removeEventListener('pointerup', onPointerUp)
