@@ -31,15 +31,21 @@ const width = Number(flag('width', '340'))
 const bgFlag = flag('bg', 'auto')
 const tolerance = Number(flag('tolerance', '45'))
 const quality = Number(flag('quality', '80'))
+const start = flag('start', null)
+const duration = flag('duration', null)
 const keepFrames = args.includes('--keep-frames')
 
 const framesDir = resolve('.anim-frames')
 rmSync(framesDir, { recursive: true, force: true })
 mkdirSync(framesDir, { recursive: true })
 
-console.log(`[1/4] 抽帧: ${video} → ${fps}fps, ${width}px 宽`)
+const trim = `${start !== null ? ` --start ${start}` : ''}${duration !== null ? ` --duration ${duration}` : ''}`
+console.log(`[1/4] 抽帧: ${video}${trim} → ${fps}fps, ${width}px 宽`)
 execFileSync(ffmpeg.path, [
-  '-y', '-i', resolve(video),
+  '-y',
+  ...(start !== null ? ['-ss', String(start)] : []),
+  '-i', resolve(video),
+  ...(duration !== null ? ['-t', String(duration)] : []),
   '-vf', `fps=${fps},scale=${width}:-1:flags=lanczos`,
   '-pix_fmt', 'rgba',
   join(framesDir, 'f_%04d.png'),
@@ -135,7 +141,31 @@ execFileSync(ffmpeg.path, [
   webpPath,
 ], { stdio: ['ignore', 'ignore', 'pipe'] })
 
-const webp = readFileSync(webpPath)
+/**
+ * ffmpeg 的 libwebp 编码器把每帧都写成 BLEND（与前一帧叠加）。带 alpha 的抠图动画
+ * 一旦叠加，上一帧永远不会被清除 → 满屏残影。WebP 的 ANMF 帧标志位在 payload 的
+ * 第 16 字节（X/Y/W/H/Duration 各 3 字节之后），bit1 = 1 表示「不与前一帧混合」，
+ * 每个 chunk 无 CRC，因此直接置位即可无损修正。
+ */
+function noBlend(webpBuffer) {
+  const buf = Buffer.from(webpBuffer)
+  let off = 12
+  let patched = 0
+  while (off + 8 <= buf.length) {
+    const fourcc = buf.toString('ascii', off, off + 4)
+    const size = buf.readUInt32LE(off + 4)
+    if (fourcc === 'ANMF' && size >= 16) {
+      buf[off + 8 + 15] |= 0x02
+      patched++
+    }
+    off += 8 + size + (size % 2)
+  }
+  return { buf, patched }
+}
+
+const raw = readFileSync(webpPath)
+const { buf: webp, patched } = noBlend(raw)
+console.log(`      修正 ${patched} 帧为「替换」模式（消除叠加残影）`)
 console.log(`[4/4] 写入资源模块（${(webp.length / 1024).toFixed(1)} KB / ${frameFiles.length} 帧）`)
 const out = resolve('src/client/pet-art.generated.ts')
 writeFileSync(out, [
