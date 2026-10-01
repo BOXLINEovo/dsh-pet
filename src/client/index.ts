@@ -11,6 +11,16 @@ const CHAR_W = 170
 const CHAR_H = 234
 const BUBBLE_H = 96
 const PAD = 10
+const CALENDAR_TTL_MS = 6 * 60 * 60 * 1000
+
+/** 投喂按钮文案（轮换，避免死板） */
+const FEED_LABELS = [
+  '投喂白饭',
+  '鱼饿了，加饭',
+  '续个饭盆',
+  '求投喂',
+  '加饭时间到',
+]
 const FLIP_MS = 300
 
 /** 可爱发言池：每句都带上余额（a 形如 ¥110.00） */
@@ -105,7 +115,9 @@ const css = `
 .dshp-heart {
   position: absolute;
   bottom: 78%;
-  font-size: 15px;
+  width: 12px;
+  height: 12px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23ff5f7e' d='M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z'/%3E%3C/svg%3E") center / contain no-repeat;
   opacity: 0;
   animation: dshp-heart 1.15s ease-out forwards;
   pointer-events: none;
@@ -158,11 +170,11 @@ function expandRange(startISO: string, days: number): string[] {
 }
 
 /**
- * 中国法定节假日放假日期（国务院办公厅通知，2026 年）。
- * 新年份公布后在此补充 `...expandRange('YYYY-MM-DD', N)` 即可；
- * 未收录的年份只按周末判定（节假日当天会误判为高峰）。
+ * 兜底用的法定节假日（2026，国务院办公厅通知）。
+ * 运行时优先使用 `/dsh-pet/calendar` 实时抓取的日历；此表仅在抓取失败时生效，
+ * 保证离线/断网时时段判定仍然可用。
  */
-const HOLIDAYS = new Set<string>([
+const FALLBACK_HOLIDAYS = new Set<string>([
   ...expandRange('2026-01-01', 3), // 元旦
   ...expandRange('2026-02-15', 9), // 春节
   ...expandRange('2026-04-04', 3), // 清明
@@ -182,28 +194,28 @@ function bjParts(ms: number): { key: string; dow: number; minutes: number } {
   }
 }
 
-function isPeakAt(ms: number): boolean {
+function isPeakAt(ms: number, holidays: ReadonlySet<string>): boolean {
   const p = bjParts(ms)
   if (p.dow === 0 || p.dow === 6) return false // 周末全天空闲
-  if (HOLIDAYS.has(p.key)) return false // 法定节假日全天空闲
+  if (holidays.has(p.key)) return false // 法定节假日全天空闲
   return PEAK_BLOCKS.some(([from, to]) => p.minutes >= from && p.minutes < to)
 }
 
-function periodNow(): { peak: boolean; text: string } {
+function periodNow(holidays: ReadonlySet<string>): { peak: boolean; text: string } {
   const now = Date.now()
-  const peak = isPeakAt(now)
+  const peak = isPeakAt(now, holidays)
   // walk forward minute by minute (≤14 days) to the next state change
   let cursor = now
   const limit = now + 14 * 24 * 60 * 60 * 1000
-  while (cursor < limit && isPeakAt(cursor) === peak) cursor += 60 * 1000
+  while (cursor < limit && isPeakAt(cursor, holidays) === peak) cursor += 60 * 1000
   const totalMin = Math.max(0, Math.round((cursor - now) / 60000))
   const days = Math.floor(totalMin / 1440)
   const hours = Math.floor((totalMin % 1440) / 60)
   const minutes = totalMin % 60
   const left = `${days > 0 ? `${days}天` : ''}${hours > 0 ? `${hours}小时` : ''}${minutes}分`
   return peak
-    ? { peak: true, text: `🔥 高峰时段 · 白饭原价，距空闲 ${left}` }
-    : { peak: false, text: `🌙 空闲时段 · 白饭半价！还剩 ${left}` }
+    ? { peak: true, text: `高峰时段 · 白饭原价，距空闲 ${left}` }
+    : { peak: false, text: `空闲时段 · 白饭半价，还剩 ${left}` }
 }
 
 export function apply(ctx: { effect(callback: () => () => void): unknown }): void {
@@ -262,7 +274,8 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
   link.href = TOP_UP_URL
   link.target = '_blank'
   link.rel = 'noreferrer'
-  link.textContent = '🍚白饭，想吃~'
+  link.title = '前往 DeepSeek 充值页'
+  link.textContent = FEED_LABELS[0]
   bubble.appendChild(link)
 
   const flip = document.createElement('div')
@@ -295,11 +308,37 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
     setFacing(dir)
   }
 
-  // ---- peak / off-peak hint ----
+  // ---- peak / off-peak hint (live holiday calendar) ----
+  const holidays = new Set<string>(FALLBACK_HOLIDAYS)
+  let calendarAt = 0
+  let calendarBusy = false
+
   const syncPeriod = (): void => {
-    const p = periodNow()
+    const p = periodNow(holidays)
     period.textContent = p.text
     period.classList.toggle('dshp-off', !p.peak)
+  }
+
+  const refreshCalendar = async (): Promise<void> => {
+    if (calendarBusy || Date.now() - calendarAt < CALENDAR_TTL_MS) return
+    calendarBusy = true
+    const first = Number(bjParts(Date.now()).key.slice(0, 4))
+    let fetched = 0
+    try {
+      for (const y of [first, first + 1]) {
+        try {
+          const resp = await fetch(`/dsh-pet/calendar?year=${y}`, { cache: 'no-store' })
+          const data = (await resp.json()) as { ok?: boolean; days?: Array<{ date?: string; off?: boolean }> }
+          if (!data.ok || !Array.isArray(data.days)) continue
+          for (const day of data.days) if (day.off && day.date) holidays.add(day.date)
+          fetched++
+        } catch { /* keep the fallback for this year */ }
+      }
+      if (fetched > 0) calendarAt = Date.now()
+    } finally {
+      calendarBusy = false
+    }
+    syncPeriod()
   }
 
   // ---- balance ----
@@ -316,6 +355,8 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
     }
     if (r.ok) {
       const amt = symbol(r.currency) + fmt(r.total)
+      link.textContent = FEED_LABELS[Math.floor(Math.random() * FEED_LABELS.length)]
+      void refreshCalendar()
       return { ok: true, line: SAYINGS[Math.floor(Math.random() * SAYINGS.length)](amt) }
     }
     return { ok: false, code: r.error ?? '未知错误', detail: r.detail }
@@ -395,7 +436,6 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
     for (let i = 0; i < 4; i++) {
       const heart = document.createElement('span')
       heart.className = 'dshp-heart'
-      heart.textContent = '❤'
       heart.style.left = `${16 + Math.random() * 68}%`
       heart.style.animationDelay = `${Math.random() * 0.18}s`
       char.appendChild(heart)
@@ -423,13 +463,16 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
   setPos(x0, y0)
 
   void refreshBalance()
+  void refreshCalendar()
   syncPeriod()
   const timer = window.setInterval(() => { void refreshBalance() }, 5 * 60 * 1000)
   const periodTimer = window.setInterval(syncPeriod, 30 * 1000)
+  const calendarTimer = window.setInterval(() => { void refreshCalendar() }, 30 * 60 * 1000)
 
   ctx.effect(() => () => {
     window.clearInterval(timer)
     window.clearInterval(periodTimer)
+    window.clearInterval(calendarTimer)
     wrap.removeEventListener('pointerdown', onPointerDown)
     wrap.removeEventListener('pointermove', onPointerMove)
     wrap.removeEventListener('pointerup', onPointerUp)

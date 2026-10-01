@@ -1,16 +1,17 @@
 /**
  * Node half of the dsh-pet deepwhale plugin. Serves the DeepSeek account
- * balance over a webServer route; the browser half renders the pet.
+ * balance and the Chinese public-holiday calendar over webServer routes; the
+ * browser half renders the pet.
  *
- * The balance lookup is deliberately redundant: a direct fetch is retried,
- * then a curl subprocess is tried (a second network stack that survives
- * transient startup DNS/TLS hiccups), and the concrete failure reason is
- * reported so the pet can show it instead of a bare error.
+ * Both lookups are redundant by design: several public sources are tried in
+ * order, results are cached in memory, and every failure reports its concrete
+ * reason so the pet can show it instead of a bare error.
  */
 import type { Context } from '@deepseek-ai/cordis'
 
 const PUBLIC_BASE = 'https://api.deepseek.com'
 const TIMEOUT_MS = 12000
+const CALENDAR_TTL_MS = 6 * 60 * 60 * 1000
 
 interface BalanceInfo {
   currency?: string
@@ -50,14 +51,13 @@ function baseCandidates(): string[] {
   const configured = process.env.DEEPSEEK_BASE_URL?.trim().replace(/\/+$/, '')
   if (configured) {
     out.push(configured)
-    // a versioned gateway prefix may sit above the public path
     out.push(configured.replace(/\/v\d+$/, ''))
   }
   out.push(PUBLIC_BASE)
   return [...new Set(out)]
 }
 
-/** Direct fetch (Node 24 global fetch). */
+/** Direct fetch (Node global fetch). */
 async function viaFetch(base: string, key: string): Promise<Record<string, unknown>> {
   const resp = await fetch(`${base}/user/balance`, {
     headers: { Authorization: `Bearer ${key}` },
@@ -110,10 +110,9 @@ async function fetchBalance(ctx: Context): Promise<Record<string, unknown>> {
   if (!hit || !hit.value) return { ok: false, error: 'no-api-key', hint: 'DEEPSEEK_API_KEY' }
 
   const key = hit.value
-  const bases = baseCandidates()
   const errors: string[] = []
   const ladder: Array<[string, () => Promise<Record<string, unknown>>]> = []
-  for (const base of bases) ladder.push([`fetch ${base}`, () => viaFetch(base, key)])
+  for (const base of baseCandidates()) ladder.push([`fetch ${base}`, () => viaFetch(base, key)])
   ladder.push([`fetch ${PUBLIC_BASE} (retry)`, () => viaFetch(PUBLIC_BASE, key)])
   ladder.push([`curl ${PUBLIC_BASE}`, () => viaCurl(ctx, PUBLIC_BASE, key)])
 
@@ -127,25 +126,107 @@ async function fetchBalance(ctx: Context): Promise<Record<string, unknown>> {
   return { ok: false, error: 'fetch-failed', detail: errors.slice(-3).join(' | ').slice(0, 300) }
 }
 
+/** One holiday/rest day. */
+interface CalendarDay {
+  date: string
+  off: boolean
+}
+
+const calendarCache = new Map<number, { at: number; days: CalendarDay[] }>()
+
+/** Order matters: the most authoritative source first. */
+function calendarSources(year: number): Array<{ name: string; load: () => Promise<CalendarDay[]> }> {
+  return [
+    {
+      // holiday-cn mirrors the State Council notices (isOffDay: false = 调休上班)
+      name: 'holiday-cn',
+      load: async () => {
+        const resp = await fetch(`https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/${year}.json`, {
+          headers: { 'User-Agent': 'dsh-pet' },
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        })
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        const data = (await resp.json()) as { days?: Array<{ date?: string; isOffDay?: boolean }> }
+        return (data.days ?? []).filter((d) => d.date).map((d) => ({ date: String(d.date), off: d.isOffDay === true }))
+      },
+    },
+    {
+      name: 'jiejiariapi',
+      load: async () => {
+        const resp = await fetch(`https://api.jiejiariapi.com/v1/holidays/${year}`, { signal: AbortSignal.timeout(TIMEOUT_MS) })
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        const data = (await resp.json()) as Record<string, { date?: string; isOffDay?: boolean }>
+        return Object.values(data).filter((d) => d?.date).map((d) => ({ date: String(d.date), off: d.isOffDay === true }))
+      },
+    },
+    {
+      name: 'timor',
+      load: async () => {
+        const resp = await fetch(`https://timor.tech/api/holiday/year/${year}`, { signal: AbortSignal.timeout(TIMEOUT_MS) })
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        const data = (await resp.json()) as { holiday?: Record<string, { date?: string; holiday?: boolean }> }
+        return Object.values(data.holiday ?? {}).filter((d) => d?.date).map((d) => ({ date: String(d.date), off: d.holiday === true }))
+      },
+    },
+  ]
+}
+
+/** Live holiday calendar for one year, cached; null when every source failed. */
+async function loadCalendar(year: number): Promise<{ days: CalendarDay[]; source: string } | null> {
+  const cached = calendarCache.get(year)
+  if (cached && Date.now() - cached.at < CALENDAR_TTL_MS) return { days: cached.days, source: 'cache' }
+  const errors: string[] = []
+  for (const source of calendarSources(year)) {
+    try {
+      const days = await source.load()
+      if (days.length > 0) {
+        calendarCache.set(year, { at: Date.now(), days })
+        return { days, source: source.name }
+      }
+      errors.push(`${source.name}: empty`)
+    } catch (error) {
+      errors.push(`${source.name}: ${reason(error)}`)
+    }
+  }
+  console.error('[dsh-pet] calendar fetch failed:', errors.join(' | '))
+  return null
+}
+
+interface ServerRequest {
+  url?: string
+}
+
 interface ServerResponse {
   writeHead(status: number, headers: Record<string, string>): void
   end(body: string): void
 }
 
-/** Wait for the web carrier before registering the route. */
+function sendJson(res: ServerResponse, data: unknown): void {
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+  res.end(JSON.stringify(data))
+}
+
+/** Wait for the web carrier before registering the routes. */
 export const inject = ['webServer']
 
-/** Web plugin row: registers the balance route, removed with the fiber. */
+/** Web plugin row: registers the balance and calendar routes, removed with the fiber. */
 export function apply(ctx: Context): void {
   const webServer = ctx.get<{ register(route: { kind: string; path: string; handler: (req: unknown, res: ServerResponse) => void | Promise<void> }): () => void }>('webServer')
   if (!webServer) return
   ctx.effect(() => webServer.register({
     kind: 'exact',
     path: '/dsh-pet/balance',
-    handler: async (_req, res) => {
-      const data = await fetchBalance(ctx)
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify(data))
+    handler: async (_req, res) => sendJson(res, await fetchBalance(ctx)),
+  }))
+  ctx.effect(() => webServer.register({
+    kind: 'exact',
+    path: '/dsh-pet/calendar',
+    handler: async (req, res) => {
+      const requested = Number(new URL((req as ServerRequest)?.url ?? '/', 'http://localhost').searchParams.get('year'))
+      const year = Number.isFinite(requested) && requested > 1970 ? requested : new Date().getUTCFullYear()
+      const result = await loadCalendar(year)
+      if (!result) return sendJson(res, { ok: false, year, error: 'calendar-unavailable' })
+      sendJson(res, { ok: true, year, source: result.source, days: result.days })
     },
   }))
 }
