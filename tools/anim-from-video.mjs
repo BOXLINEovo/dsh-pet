@@ -179,16 +179,33 @@ function noBlend(webpBuffer) {
 const raw = readFileSync(webpPath)
 const { buf: webp, patched } = noBlend(raw)
 console.log(`      修正 ${patched} 帧为「替换」模式（消除叠加残影）`)
-console.log(`[4/4] 写入资源模块（${(webp.length / 1024).toFixed(1)} KB / ${frameFiles.length} 帧）`)
+
+// 静止帧：动画序列的第 1 帧（来回模式下动画结束也会回到它，切换时无缝）
+const restPath = resolve('.anim-rest.webp')
+execFileSync(ffmpeg.path, [
+  '-y', '-i', join(framesDir, 's_0001.png'),
+  '-vcodec', 'libwebp', '-lossless', '0', '-q:v', '75',
+  restPath,
+], { stdio: ['ignore', 'ignore', 'pipe'] })
+const rest = readFileSync(restPath)
+
+console.log(`[4/4] 写入资源模块（动画 ${(webp.length / 1024).toFixed(1)} KB + 静止帧 ${(rest.length / 1024).toFixed(1)} KB / ${sequence.length} 帧）`)
 const out = resolve('src/client/pet-art.generated.ts')
 writeFileSync(out, [
-  '// Generated pet art (data URL). Regenerate with:',
-  '//   node tools/anim-from-video.mjs <video> [--fps 12] [--width 340] [--bg auto]',
-  `export const DEEPWHALE_PET = 'data:image/webp;base64,${webp.toString('base64')}'`,
+  '// Generated pet art. Regenerate with:',
+  '//   node tools/anim-from-video.mjs <video> --start 7 --duration 3 --pingpong [--fps 8] [--width 240]',
+  '// 注意：字面量包在 [..].join(\'\') 里是为了阻止打包器把巨型 data URL 内联到每个使用点。',
+  '/** 静止姿态（动画首帧，动画播完正好回到它） */',
+  `export const PET_REST = ['data:image/webp;base64,${rest.toString('base64')}'].join('')`,
+  '/** 交互触发的动画（来回播放，无缝循环） */',
+  `export const PET_ANIM = ['data:image/webp;base64,${webp.toString('base64')}'].join('')`,
+  `export const PET_FRAMES = ${sequence.length}`,
+  `export const PET_FPS = ${fps}`,
   '',
 ].join('\n'))
 
 if (!keepFrames) rmSync(framesDir, { recursive: true, force: true })
 rmSync(webpPath, { force: true })
+rmSync(restPath, { force: true })
 console.log(`完成: ${out}`)
 console.log('下一步: pnpm build → 同步 GitHub → 重启 DSH')
