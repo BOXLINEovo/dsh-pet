@@ -11,7 +11,7 @@
  *   4. 写入 src/client/pet-art.generated.ts（data URL，客户端 <img> 直接播放）
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import ffmpeg from '@ffmpeg-installer/ffmpeg'
 import { PNG } from 'pngjs'
@@ -19,7 +19,9 @@ import { PNG } from 'pngjs'
 const args = process.argv.slice(2)
 const video = args[0]
 if (!video) {
-  console.error('usage: node tools/anim-from-video.mjs <video> [--fps 12] [--width 340] [--bg auto|#RRGGBB|white|green] [--tolerance 45] [--quality 80] [--keep-frames]')
+  console.error('usage: node tools/anim-from-video.mjs <video> [--fps 12] [--width 340] [--bg auto|#RRGGBB|white|green]')
+  console.error('                                       [--tolerance 45] [--quality 80] [--start 7] [--duration 3]')
+  console.error('                                       [--pingpong] [--keep-frames]')
   process.exit(2)
 }
 const flag = (name, fallback) => {
@@ -33,6 +35,7 @@ const tolerance = Number(flag('tolerance', '45'))
 const quality = Number(flag('quality', '80'))
 const start = flag('start', null)
 const duration = flag('duration', null)
+const pingpong = args.includes('--pingpong')
 const keepFrames = args.includes('--keep-frames')
 
 const framesDir = resolve('.anim-frames')
@@ -133,9 +136,19 @@ for (const [n, file] of frameFiles.entries()) {
 }
 
 const webpPath = resolve('.anim-out.webp')
+// 可选：来回播放（正放 + 倒放），得到无缝循环的「转身再转回来」
+let sequence = frameFiles.map((f) => join(framesDir, f))
+if (pingpong && frameFiles.length > 2) {
+  const back = frameFiles.slice(0, -1).reverse().map((f) => join(framesDir, f))
+  sequence = [...sequence, ...back]
+  console.log(`      来回模式: ${frameFiles.length} 帧 → ${sequence.length} 帧`)
+}
+// 统一重命名为连续序列，交给 ffmpeg 的 s_%04d 模式
+sequence.forEach((src, i) => copyFileSync(src, join(framesDir, `s_${String(i + 1).padStart(4, '0')}.png`)))
+
 console.log(`[3/4] 合成透明动画 WebP（quality ${quality}）`)
 execFileSync(ffmpeg.path, [
-  '-y', '-framerate', String(fps), '-i', join(framesDir, 'f_%04d.png'),
+  '-y', '-framerate', String(fps), '-i', join(framesDir, 's_%04d.png'),
   '-vcodec', 'libwebp', '-lossless', '0', '-q:v', String(quality),
   '-loop', '0', '-an', '-vsync', '0', '-pix_fmt', 'yuva420p',
   webpPath,
