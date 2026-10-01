@@ -4,7 +4,7 @@
  * sayings. Pure-DOM implementation — no React — mirrored on the maid-atelier
  * client pattern, with every write retracted by the Cordis effect disposer.
  */
-import { PET_ANIM, PET_FPS, PET_FRAMES, PET_REST } from './pet-art.generated.ts'
+import { PET_ANIMS, PET_IDLE } from './pet-art.ts'
 
 const TOP_UP_URL = 'https://platform.deepseek.com/top_up'
 const CHAR_W = 170
@@ -12,8 +12,6 @@ const CHAR_H = 234
 const BUBBLE_H = 96
 const PAD = 10
 const CALENDAR_TTL_MS = 6 * 60 * 60 * 1000
-/** 一轮动画时长（来回转身），播完正好回到静止帧 */
-const ANIM_MS = Math.round((PET_FRAMES / PET_FPS) * 1000)
 
 /** 投喂按钮文案（轮换，避免死板） */
 const FEED_LABELS = [
@@ -286,7 +284,7 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
 
   const img = document.createElement('img')
   img.className = 'dshp-img'
-  img.src = PET_REST
+  img.src = PET_IDLE
   img.alt = 'DeepSeek 大肥鱼'
   img.draggable = false
   flip.appendChild(img)
@@ -309,39 +307,30 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
     setFacing(dir)
   }
 
-  // ---- sprite animation：只在点击 / 拖拽时播放，平时保持静止帧 ----
-  let animStartedAt = 0
-  let animStopTimer: number | undefined
+  // ---- 交互动画：只在点击时随机播放一个，且只播一次（拖拽不触发） ----
+  let animTimer: number | undefined
 
-  const playAnim = (): void => {
-    if (animStopTimer !== undefined) {
-      window.clearTimeout(animStopTimer)
-      animStopTimer = undefined
+  const playRandomAnim = (): void => {
+    if (PET_ANIMS.length === 0) return
+    const anim = PET_ANIMS[Math.floor(Math.random() * PET_ANIMS.length)]
+    if (animTimer !== undefined) {
+      window.clearTimeout(animTimer)
+      animTimer = undefined
     }
-    if (img.src !== PET_ANIM) {
-      img.src = PET_ANIM
-      animStartedAt = Date.now()
-      return
+    const start = (): void => {
+      img.src = anim.src
+      animTimer = window.setTimeout(() => {
+        img.src = PET_IDLE
+        animTimer = undefined
+      }, anim.duration)
     }
-    // 已在播放：等这一轮走完再从头开始（保持连续）
-    const elapsed = (Date.now() - animStartedAt) % ANIM_MS
-    window.setTimeout(() => {
-      img.src = PET_REST
-      window.requestAnimationFrame(() => {
-        img.src = PET_ANIM
-        animStartedAt = Date.now()
-      })
-    }, ANIM_MS - elapsed)
-  }
-
-  /** 交互结束后，等当前这一轮播完再回到静止帧（避免半路跳回） */
-  const settleAnim = (): void => {
-    if (img.src !== PET_ANIM) return
-    const elapsed = (Date.now() - animStartedAt) % ANIM_MS
-    animStopTimer = window.setTimeout(() => {
-      img.src = PET_REST
-      animStopTimer = undefined
-    }, ANIM_MS - elapsed)
+    // 同一动画连续触发时，先切回静止图再切回来，强制从头播放
+    if (img.src === anim.src) {
+      img.src = PET_IDLE
+      window.requestAnimationFrame(start)
+    } else {
+      start()
+    }
   }
 
   // ---- peak / off-peak hint (live holiday calendar) ----
@@ -426,7 +415,6 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
   // ---- interactions ----
   const onPointerDown = (e: PointerEvent): void => {
     e.preventDefault()
-    playAnim()
     try { wrap.setPointerCapture(e.pointerId) } catch { /* ignore */ }
     const r = view.node ? view.node.getBoundingClientRect() : view.rect
     if (!r) return
@@ -465,12 +453,11 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
     } else {
       pet()
     }
-    settleAnim()
   }
   const onLinkDown = (e: Event): void => e.stopPropagation()
 
   const pet = (): void => {
-    playAnim()
+    playRandomAnim()
     img.classList.add('dshp-petting')
     for (let i = 0; i < 4; i++) {
       const heart = document.createElement('span')

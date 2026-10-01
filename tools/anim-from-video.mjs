@@ -1,14 +1,16 @@
 /**
- * dsh-pet 动画素材管线：视频 → 逐帧抠底 → 透明动画 WebP → 内联资源模块。
+ * dsh-pet 素材管线。
  *
- *   node tools/anim-from-video.mjs <video> [--fps 12] [--width 340] [--bg auto]
- *                                      [--tolerance 45] [--quality 80] [--keep-frames]
+ * 静止图（默认显示，运行时应使用最初的立绘）：
+ *   node tools/anim-from-video.mjs --idle <图片> [--width 240] [--height 320] [--quality 75]
+ *     → 写出 src/client/pet-idle.generated.ts
  *
- * 步骤：
- *   1. ffmpeg 抽帧并按宽度缩放（PNG，保留 alpha 通道）
- *   2. 每帧从四边泛洪抠底（自动识别背景色；只去除与边缘连通的背景，角色内部同色区域保留）
- *   3. ffmpeg 合成透明动画 WebP（libwebp，支持 alpha）
- *   4. 写入 src/client/pet-art.generated.ts（data URL，客户端 <img> 直接播放）
+ * 交互动画（点击时随机播放一个；可多次执行以添加多个动画）：
+ *   node tools/anim-from-video.mjs <视频> --name turn [--start 7] [--duration 3] [--pingpong]
+ *                                        [--fps 8] [--width 240] [--quality 58] [--tolerance 45]
+ *     → 写出 src/client/anim-<name>.generated.ts
+ *
+ * 每生成一个动画，就在 src/client/pet-art.ts 里 import 并加入 PET_ANIMS 数组。
  */
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -17,26 +19,64 @@ import ffmpeg from '@ffmpeg-installer/ffmpeg'
 import { PNG } from 'pngjs'
 
 const args = process.argv.slice(2)
-const video = args[0]
-if (!video) {
-  console.error('usage: node tools/anim-from-video.mjs <video> [--fps 12] [--width 340] [--bg auto|#RRGGBB|white|green]')
-  console.error('                                       [--tolerance 45] [--quality 80] [--start 7] [--duration 3]')
-  console.error('                                       [--pingpong] [--keep-frames]')
-  process.exit(2)
-}
 const flag = (name, fallback) => {
   const i = args.indexOf(`--${name}`)
   return i >= 0 && args[i + 1] ? args[i + 1] : fallback
 }
-const fps = Number(flag('fps', '12'))
-const width = Number(flag('width', '340'))
+const has = (name) => args.includes(`--${name}`)
+
+const idleImage = flag('idle', null)
+const video = args[0] && !args[0].startsWith('--') ? args[0] : null
+
+if (!idleImage && !video) {
+  console.error('用法:')
+  console.error('  静止图  node tools/anim-from-video.mjs --idle <图片> [--width 240] [--height 320] [--quality 75]')
+  console.error('  交互动画 node tools/anim-from-video.mjs <视频> --name turn [--start 7] [--duration 3] [--pingpong]')
+  console.error('                                        [--fps 8] [--width 240] [--quality 58] [--tolerance 45]')
+  process.exit(2)
+}
+
+const width = Number(flag('width', '240'))
+const quality = Number(flag('quality', idleImage ? '75' : '58'))
+const QUALITY = quality
+const keepFrames = has('keep-frames')
+
+/** data URL 用 [..].join('') 包裹，阻止打包器把巨型字面量内联到每个使用点。 */
+const dataUrlLine = (name, buffer) => `export const ${name} = ['data:image/webp;base64,${buffer.toString('base64')}'].join('')`
+
+// ---------------------------------------------------------------- 静止图模式
+if (idleImage) {
+  const height = Number(flag('height', '320'))
+  const out = resolve('src/client/pet-idle.generated.ts')
+  const tmp = resolve('.idle-tmp.webp')
+  console.log(`[idle] ${idleImage} → ${width}x${height}, quality ${QUALITY}`)
+  execFileSync(ffmpeg.path, [
+    '-y', '-i', resolve(idleImage),
+    '-vf', `scale=${width}:${height}:flags=lanczos`,
+    '-vcodec', 'libwebp', '-lossless', '0', '-q:v', String(QUALITY),
+    tmp,
+  ], { stdio: ['ignore', 'ignore', 'pipe'] })
+  const buf = readFileSync(tmp)
+  writeFileSync(out, [
+    '// Generated idle art. Regenerate with:',
+    '//   node tools/anim-from-video.mjs --idle <图片> --width 240 --height 320',
+    '/** 默认静止姿态（点击动画播完也回到它） */',
+    dataUrlLine('PET_IDLE', buf),
+    '',
+  ].join('\n'))
+  rmSync(tmp, { force: true })
+  console.log(`完成: ${out} (${(buf.length / 1024).toFixed(1)} KB)`)
+  process.exit(0)
+}
+
+// ---------------------------------------------------------------- 动画模式
+const name = flag('name', 'turn')
+const fps = Number(flag('fps', '8'))
 const bgFlag = flag('bg', 'auto')
 const tolerance = Number(flag('tolerance', '45'))
-const quality = Number(flag('quality', '80'))
 const start = flag('start', null)
 const duration = flag('duration', null)
-const pingpong = args.includes('--pingpong')
-const keepFrames = args.includes('--keep-frames')
+const pingpong = has('pingpong')
 
 const framesDir = resolve('.anim-frames')
 rmSync(framesDir, { recursive: true, force: true })
@@ -58,7 +98,6 @@ const frameFiles = readdirSync(framesDir).filter((f) => f.endsWith('.png')).sort
 if (frameFiles.length === 0) throw new Error('没有抽到任何帧')
 console.log(`      抽到 ${frameFiles.length} 帧`)
 
-/** 解析 --bg 参数；auto 时取四角像素的多数色。 */
 function resolveBackground(png, mode) {
   const named = { white: [255, 255, 255], green: [0, 255, 0], black: [0, 0, 0] }
   if (mode !== 'auto') {
@@ -77,11 +116,9 @@ function resolveBackground(png, mode) {
     const key = `${png.data[i]},${png.data[i + 1]},${png.data[i + 2]}`
     counts.set(key, (counts.get(key) ?? 0) + 1)
   }
-  const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0]
-  return best.split(',').map(Number)
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0].split(',').map(Number)
 }
 
-/** 从四边泛洪抠底，边缘按色差羽化。 */
 function removeBackground(png, bg, tolerance) {
   const { width: w, height: h, data } = png
   const diff = (i) => Math.max(
@@ -101,13 +138,12 @@ function removeBackground(png, bg, tolerance) {
   }
   for (let x = 0; x < w; x++) { push(x, 0); push(x, h - 1) }
   for (let y = 0; y < h; y++) { push(0, y); push(w - 1, y) }
-
   let cleared = 0
   for (let head = 0; head < queue.length; head++) {
     const idx = queue[head]
     const i = idx << 2
     const d = diff(i)
-    if (d > tolerance) continue // 角色本体：停止扩散
+    if (d > tolerance) continue
     if (d <= feather) {
       data[i + 3] = 0
       cleared++
@@ -135,30 +171,27 @@ for (const [n, file] of frameFiles.entries()) {
   if (n % 10 === 0 || n === frameFiles.length - 1) console.log(`      帧 ${n + 1}/${frameFiles.length}（清除 ${cleared} px）`)
 }
 
-const webpPath = resolve('.anim-out.webp')
-// 可选：来回播放（正放 + 倒放），得到无缝循环的「转身再转回来」
 let sequence = frameFiles.map((f) => join(framesDir, f))
 if (pingpong && frameFiles.length > 2) {
   const back = frameFiles.slice(0, -1).reverse().map((f) => join(framesDir, f))
   sequence = [...sequence, ...back]
   console.log(`      来回模式: ${frameFiles.length} 帧 → ${sequence.length} 帧`)
 }
-// 统一重命名为连续序列，交给 ffmpeg 的 s_%04d 模式
 sequence.forEach((src, i) => copyFileSync(src, join(framesDir, `s_${String(i + 1).padStart(4, '0')}.png`)))
 
-console.log(`[3/4] 合成透明动画 WebP（quality ${quality}）`)
+const webpPath = resolve('.anim-out.webp')
+console.log(`[3/4] 合成透明动画 WebP（quality ${QUALITY}）`)
 execFileSync(ffmpeg.path, [
   '-y', '-framerate', String(fps), '-i', join(framesDir, 's_%04d.png'),
-  '-vcodec', 'libwebp', '-lossless', '0', '-q:v', String(quality),
+  '-vcodec', 'libwebp', '-lossless', '0', '-q:v', String(QUALITY),
   '-loop', '0', '-an', '-vsync', '0', '-pix_fmt', 'yuva420p',
   webpPath,
 ], { stdio: ['ignore', 'ignore', 'pipe'] })
 
 /**
- * ffmpeg 的 libwebp 编码器把每帧都写成 BLEND（与前一帧叠加）。带 alpha 的抠图动画
- * 一旦叠加，上一帧永远不会被清除 → 满屏残影。WebP 的 ANMF 帧标志位在 payload 的
- * 第 16 字节（X/Y/W/H/Duration 各 3 字节之后），bit1 = 1 表示「不与前一帧混合」，
- * 每个 chunk 无 CRC，因此直接置位即可无损修正。
+ * ffmpeg 的 libwebp 把每帧都写成 BLEND（与前一帧叠加）。带 alpha 的抠图动画一旦叠加，
+ * 上一帧永远不会被清除 → 满屏残影。ANMF 帧标志位在 payload 第 16 字节（X/Y/W/H/Duration
+ * 各 3 字节之后），bit1 = 1 表示「不与前一帧混合」；chunk 无 CRC，直接置位即可。
  */
 function noBlend(webpBuffer) {
   const buf = Buffer.from(webpBuffer)
@@ -176,36 +209,21 @@ function noBlend(webpBuffer) {
   return { buf, patched }
 }
 
-const raw = readFileSync(webpPath)
-const { buf: webp, patched } = noBlend(raw)
-console.log(`      修正 ${patched} 帧为「替换」模式（消除叠加残影）`)
-
-// 静止帧：动画序列的第 1 帧（来回模式下动画结束也会回到它，切换时无缝）
-const restPath = resolve('.anim-rest.webp')
-execFileSync(ffmpeg.path, [
-  '-y', '-i', join(framesDir, 's_0001.png'),
-  '-vcodec', 'libwebp', '-lossless', '0', '-q:v', '75',
-  restPath,
-], { stdio: ['ignore', 'ignore', 'pipe'] })
-const rest = readFileSync(restPath)
-
-console.log(`[4/4] 写入资源模块（动画 ${(webp.length / 1024).toFixed(1)} KB + 静止帧 ${(rest.length / 1024).toFixed(1)} KB / ${sequence.length} 帧）`)
-const out = resolve('src/client/pet-art.generated.ts')
+const { buf: webp, patched } = noBlend(readFileSync(webpPath))
+const slug = name.replace(/[^a-zA-Z0-9_-]/g, '')
+const out = resolve(`src/client/anim-${slug}.generated.ts`)
+console.log(`[4/4] 修正 ${patched} 帧为「替换」模式 → ${out}（${(webp.length / 1024).toFixed(1)} KB / ${sequence.length} 帧）`)
 writeFileSync(out, [
-  '// Generated pet art. Regenerate with:',
-  '//   node tools/anim-from-video.mjs <video> --start 7 --duration 3 --pingpong [--fps 8] [--width 240]',
-  '// 注意：字面量包在 [..].join(\'\') 里是为了阻止打包器把巨型 data URL 内联到每个使用点。',
-  '/** 静止姿态（动画首帧，动画播完正好回到它） */',
-  `export const PET_REST = ['data:image/webp;base64,${rest.toString('base64')}'].join('')`,
-  '/** 交互触发的动画（来回播放，无缝循环） */',
-  `export const PET_ANIM = ['data:image/webp;base64,${webp.toString('base64')}'].join('')`,
-  `export const PET_FRAMES = ${sequence.length}`,
-  `export const PET_FPS = ${fps}`,
+  '// Generated animation. Regenerate with:',
+  `//   node tools/anim-from-video.mjs <视频> --name ${slug} --start 7 --duration 3 --pingpong`,
+  `/** ${slug} 动画（${sequence.length} 帧 @ ${fps}fps） */`,
+  dataUrlLine('ANIM_SRC', webp),
+  `export const ANIM_FRAMES = ${sequence.length}`,
+  `export const ANIM_FPS = ${fps}`,
   '',
 ].join('\n'))
 
 if (!keepFrames) rmSync(framesDir, { recursive: true, force: true })
 rmSync(webpPath, { force: true })
-rmSync(restPath, { force: true })
 console.log(`完成: ${out}`)
-console.log('下一步: pnpm build → 同步 GitHub → 重启 DSH')
+console.log(`记得在 src/client/pet-art.ts 里 import 并加入 PET_ANIMS（名字: ${slug}）`)

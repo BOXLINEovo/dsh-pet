@@ -44,25 +44,44 @@ pnpm build
 # 产物：lib/index.js（节点半）+ lib/client.js（浏览器半）
 ```
 
-## 动画素材管线（可选）
+## 素材管线
 
-想把静态立绘换成**真正会动的动画**，只需提供一段循环视频：
+素材分两类：**静止图**（平时显示）与**交互动画池**（点击时随机播放一个，只播一次；拖拽不触发）。全部由 `tools/anim-from-video.mjs` 生成。
+
+**静止图**（用最初的立绘，不要用动画首帧）：
 
 ```bash
-pnpm anim <你的视频.mp4> --fps 12 --width 340
-pnpm build
+node tools/anim-from-video.mjs --idle <立绘.png> --width 240 --height 320 --quality 75
+# → src/client/pet-idle.generated.ts
 ```
 
-脚本会自动完成：抽帧 → **逐帧抠底**（从四边泛洪 + 边缘羽化，自动识别背景色）→ 合成**透明动画 WebP** → 更新 `src/client/pet-art.generated.ts`（客户端 `<img>` 原生播放，无需改代码）。
+**交互动画**（每段视频产出一个动画文件）：
+
+```bash
+node tools/anim-from-video.mjs <视频.mp4> --name turn --start 7 --duration 3 --pingpong --fps 8 --width 240 --quality 58
+# → src/client/anim-turn.generated.ts
+```
+
+生成后在 `src/client/pet-art.ts` 里 import 并加入 `PET_ANIMS` 数组即可（点击时会在池中**随机**挑一个，`--name` 就是标识名）：
+
+```ts
+import { ANIM_SRC as WAVE_SRC, ANIM_FRAMES as WAVE_FRAMES, ANIM_FPS as WAVE_FPS } from './anim-wave.generated.ts'
+
+export const PET_ANIMS: PetAnimation[] = [
+  { name: 'turn', src: TURN_SRC, frames: TURN_FRAMES, fps: TURN_FPS, duration: ... },
+  { name: 'wave', src: WAVE_SRC, frames: WAVE_FRAMES, fps: WAVE_FPS, duration: ... },
+]
+```
+
+脚本自动完成：抽帧 → **逐帧抠底**（四边泛洪 + 边缘羽化，自动识别背景色）→ 合成**透明动画 WebP** → 修正帧标志（`replace`，避免叠加残影）→ 写出资源模块。
 
 **录制/生成视频的建议**：
 
-- 背景用**纯色**（白或绿），越干净抠得越准；不要用渐变或实景
-- 首尾帧尽量一致，做到**无缝循环**（单个循环 2~4 秒最适合待机）
+- 背景用**纯色**（白或黑或绿），越干净抠得越准，不要用渐变或实景
 - 角色基本居中、不出画，分辨率不低于 512px 宽
-- 内容以**待机动作**为主：轻微起伏、摆尾、眨眼、头发飘动
+- 想要无缝循环就用 `--pingpong`（正放 + 倒放）
 
-常用参数：`--bg white|green|#RRGGBB|auto`（默认 auto，取四角颜色）、`--tolerance 45`（背景容差）、`--quality 80`（WebP 质量）、`--keep-frames`（保留中间帧便于排查）。
+常用参数：`--bg white|green|black|#RRGGBB|auto`（默认 auto，取四角颜色）、`--tolerance 45`（背景容差）、`--quality`（WebP 质量）、`--start/--duration`（截取片段）、`--pingpong`（来回播放）、`--keep-frames`（保留中间帧排查）。
 
 ## 素材版权
 
