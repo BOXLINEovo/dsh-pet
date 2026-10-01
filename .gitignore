@@ -1,3 +1,6 @@
 node_modules/
 pnpm-store/
 *.log
+.anim-frames/
+.anim-test/
+*.bak
