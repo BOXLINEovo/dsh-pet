@@ -60,7 +60,6 @@ const css = `
   display: block;
   filter: drop-shadow(0 10px 14px rgba(0, 0, 0, 0.3));
 }
-.dshp-img.dshp-petting { animation: dshp-pet 0.9s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
 .dshp-bubble {
   position: absolute;
   left: 50%;
@@ -111,34 +110,6 @@ const css = `
   transition: background 0.15s ease;
 }
 .dshp-link:hover { background: var(--dsw-alias-bg-layer-1); }
-.dshp-heart {
-  position: absolute;
-  bottom: 78%;
-  width: 12px;
-  height: 12px;
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23ff5f7e' d='M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z'/%3E%3C/svg%3E") center / contain no-repeat;
-  opacity: 0;
-  animation: dshp-heart 1.15s ease-out forwards;
-  pointer-events: none;
-  z-index: 5;
-}
-@keyframes dshp-breathe {
-  0%, 100% { transform: scale(1) rotate(0deg); }
-  50% { transform: scale(1.015, 1.005) rotate(0.5deg); }
-}
-@keyframes dshp-pet {
-  0% { transform: scale(1); }
-  20% { transform: scale(1.1, 0.92) rotate(-2deg); }
-  40% { transform: scale(0.92, 1.08) rotate(2deg); }
-  60% { transform: scale(1.05, 0.96) rotate(-1deg); }
-  80% { transform: scale(0.98, 1.02); }
-  100% { transform: scale(1); }
-}
-@keyframes dshp-heart {
-  0% { opacity: 0; transform: translateY(6px) scale(0.5); }
-  15% { opacity: 1; }
-  100% { opacity: 0; transform: translateY(-84px) scale(1.15); }
-}
 `
 
 function fmt(v: unknown): string {
@@ -456,18 +427,9 @@ export function apply(ctx: { effect(callback: () => () => void): unknown }): voi
   }
   const onLinkDown = (e: Event): void => e.stopPropagation()
 
+  /** 点击：播放随机动画 + 刷新余额（已移除挤压动画与爱心效果） */
   const pet = (): void => {
     playRandomAnim()
-    img.classList.add('dshp-petting')
-    for (let i = 0; i < 4; i++) {
-      const heart = document.createElement('span')
-      heart.className = 'dshp-heart'
-      heart.style.left = `${16 + Math.random() * 68}%`
-      heart.style.animationDelay = `${Math.random() * 0.18}s`
-      char.appendChild(heart)
-      window.setTimeout(() => heart.remove(), 1400)
-    }
-    window.setTimeout(() => img.classList.remove('dshp-petting'), 1000)
     void refreshBalance()
   }
 
